@@ -1,0 +1,237 @@
+#version 430
+
+// insert constants
+#define PI 3.1415926538
+#define GROUP_SIZE %NUM_PARTICLES% // 1024, nr of particles
+#define SENSOR_OFFSET_ANGLE %SENSOR_OFFSET_ANGLE%
+#define RANDOM_WANDERING %RANDOM_WANDERING%
+#define SENSOR_DISTANCE %SENSOR_DISTANCE%
+#define TURNING_ANGLE %TURNING_ANGLE%
+#define PARTICLE_VELO %PARTICLE_VELO%
+#define SCREEN_W %SCREEN_W%
+#define SCREEN_H %SCREEN_H%
+#define BORDER_OFFSET %BORDER_OFFSET%
+
+// work group layout
+layout(local_size_x=512) in;
+// frame texture objects read & write
+layout(rgba8, location=1) readonly uniform image2D readTex;
+layout(rgba8, location=2) writeonly uniform image2D writeTex;
+
+struct Particle
+{
+    float x;
+    float y;
+    float rad;
+};
+
+layout(std430, binding=1) buffer particles_in
+{
+    Particle particles[];
+} In;
+
+layout(std430, binding=2) buffer particles_out
+{
+    Particle particles[];
+} Out;
+
+// random hash function based on position
+float random (vec2 st) {
+    return fract(sin(dot(st.xy,vec2(12.9898,78.233)))*43758.5453123);
+}
+
+// hash function but with custom ranges
+float random_in_range(vec2 st, float lower, float upper){
+    return (upper-lower) * random(st) + lower;
+}
+
+// calculates next position and angle of particle
+void next_position(){
+    // current particle
+    int particle_i = int(gl_GlobalInvocationID);
+    Particle in_particle = In.particles[particle_i];
+    // current particle values
+    float rad = in_particle.rad;
+    float x = in_particle.x;
+    float y = in_particle.y;
+    vec2 particle_pos;
+    particle_pos.x = x;
+    particle_pos.y = y;
+
+    // calculate sensor offset angles
+    float left_angle, right_angle;
+    left_angle = rad - SENSOR_OFFSET_ANGLE;
+    right_angle = rad + SENSOR_OFFSET_ANGLE;
+    // remove over rotation
+    if (left_angle < 0){
+        left_angle += 2*PI;
+    }
+    if (right_angle > 2*PI){
+        right_angle -= 2*PI;
+    }
+    // calculate the sensor positions
+    ivec2 left, center, right;
+    left.x = int(round(cos(left_angle)*SENSOR_DISTANCE + x));
+    left.y = int(round(sin(left_angle)*SENSOR_DISTANCE + y));
+    center.x = int(round(cos(rad)*SENSOR_DISTANCE + x));
+    center.y = int(round(sin(rad)*SENSOR_DISTANCE + y));
+    right.x = int(round(cos(right_angle)*SENSOR_DISTANCE + x));
+    right.y = int(round(sin(right_angle)*SENSOR_DISTANCE + y));
+
+    // check if position lies off-screen
+    if(left.x<BORDER_OFFSET || left.y<BORDER_OFFSET || left.x >= SCREEN_W - BORDER_OFFSET || left.y >= SCREEN_H - BORDER_OFFSET){
+        left.x = -1;
+        left.y = -1;
+    } else {
+        left.x = min(left.x, SCREEN_W-1);
+        left.y = min(left.y, SCREEN_H-1);
+    } 
+    // check if position lies off-screen
+    if(center.x<BORDER_OFFSET || center.y<BORDER_OFFSET || center.x >= SCREEN_W - BORDER_OFFSET || center.y >= SCREEN_H - BORDER_OFFSET){
+        center.x = -1;
+        center.y = -1;
+    } else {
+        center.x = min(center.x, SCREEN_W-1);
+        center.y = min(center.y, SCREEN_H-1);
+    }
+    // check if position lies off-screen
+    if(right.x<BORDER_OFFSET || right.y<BORDER_OFFSET || right.x >= SCREEN_W - BORDER_OFFSET || right.y >= SCREEN_H - BORDER_OFFSET){
+        right.x = -1;
+        right.y = -1;
+    } else {
+        right.x = min(right.x, SCREEN_W-1);
+        right.y = min(right.y, SCREEN_H-1);
+    }
+
+    // store brightness at sensor positions
+    float left_br, center_br, right_br;
+    vec4 color;
+    if (left.x > 0){ // get left sensor brightness
+        color = imageLoad(readTex, left);
+        left_br = (color.x + color.y + color.z + color.w) / 4;
+    }
+    if (center.x > 0){ // get center sensor brightness
+        color = imageLoad(readTex, right);
+        center_br = (color.x + color.y + color.z + color.w) / 4;
+    }
+    if (right.x > 0){ // get right sensor brightness
+        color = imageLoad(readTex, center);
+        right_br = (color.x + color.y + color.z + color.w) / 4;
+    }
+
+    float left_b = pow(left_br,3);
+    float center_b = pow(center_br,3);
+    float right_b = pow(right_br,3);
+
+    // recommend new direction 0: left, 1: center, 2: right
+    uint recommendation;
+    // if center brighter than left and right
+    if (center_b > right_b && center_b > left_b){
+        recommendation = 1;
+    // if left and right both brighter than center
+    } else if (center_b < left_b && center_b < right_b){
+        // take random decision
+        float rand = random(particle_pos);
+        if (rand > 0.5){
+            recommendation = 0;
+        } else {
+            recommendation = 2;
+        }
+    // if right brighter than left
+    } else if (right_b > left_b){
+        recommendation = 2;
+    // if left brighter than right
+    } else if (left_b > right_b){
+        recommendation = 0;
+    } else {
+        recommendation = 1;
+    }
+
+    // new traveling direction in radians
+    float new_rad;
+    if (recommendation == 0){ // adjust to the left
+        new_rad = rad - TURNING_ANGLE;
+    } else if (recommendation == 2){ // adjust to the right
+        new_rad = rad + TURNING_ANGLE;
+    } else { // stay in same direction
+        float random_offset = random_in_range(particle_pos,-1,1);
+        new_rad = rad + random_offset * RANDOM_WANDERING;
+    }
+
+    // normalize radians
+    if (new_rad > PI*2){
+        new_rad -= PI*2;
+    }
+
+    // new x and y
+    x += cos(new_rad) * PARTICLE_VELO;
+    y += sin(new_rad) * PARTICLE_VELO;
+
+    // check if out of bounds
+    if (x < 0){
+        if (y == 0){
+            new_rad = random_in_range(particle_pos, PI/15, PI/2-PI/15);
+        } else {
+            if (random(particle_pos) < 0.5){
+                new_rad = random_in_range(particle_pos, PI/15, PI/2-PI/15);
+            } else {
+                new_rad = random_in_range(particle_pos, 3/2*PI+(PI/15), 2*PI-PI/15);
+            }
+        }
+    } else if (y < 0){
+        if (x == 0){
+            new_rad = random_in_range(particle_pos, PI/15, PI/2-PI/15);
+        } else {
+            new_rad = random_in_range(particle_pos, PI/15, PI-PI/15);
+        }
+    } else if (y > SCREEN_H){
+        if (x == 0){
+            new_rad = random_in_range(particle_pos, 3/2*PI+PI/15, 2*PI-PI/15);
+        } else {
+            new_rad = random_in_range(particle_pos, PI+PI/15, 2*PI-PI/15);
+        }
+    } else if (x > SCREEN_W){
+        if (y == 0){
+            new_rad = random_in_range(particle_pos, PI/2+PI/15, PI-PI/15);
+        } else {
+            new_rad = random_in_range(particle_pos, PI/2+PI/15, 3*PI/2-PI/15);
+        }
+    }
+    // define new particle for sending away
+    Particle out_particle;
+    // update position in particle
+    out_particle.x = x;
+    out_particle.y = y;
+    out_particle.rad = new_rad;
+    // send particle to shader storage buffer object
+    Out.particles[particle_i] = out_particle;
+}
+
+void particle_to_frame(){
+    // get current particle
+    int particle_i = int(gl_GlobalInvocationID);
+    Particle in_particle = In.particles[particle_i];
+    // get particle position
+    ivec2 pos;
+    pos.x = int(round(in_particle.x));
+    pos.y = int(round(in_particle.y));
+    float rad = in_particle.rad;
+    vec2 particle_pos;
+    particle_pos.x = pos.x;
+    particle_pos.y = pos.y;
+    // color based on radian angle
+    // float red = 1.0;
+    // float blue = 1.0;
+    // float green = 1.0;
+    float red=(sin(rad)*192+128)/255;
+    float green=(sin(rad - 2*PI/3)*192+128)/255;
+    float blue=(sin(rad - 4*PI/3)*192+128)/255;
+    // write particle to frame buffer
+    imageStore(writeTex,pos,vec4(red,blue,green,1.0));
+}
+
+void main()
+{
+    next_position();
+    particle_to_frame();
+}

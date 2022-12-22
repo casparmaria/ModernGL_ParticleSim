@@ -1,0 +1,33 @@
+#version 430
+// constants
+#define SCREEN_W %SCREEN_W%
+#define SCREEN_H %SCREEN_H%
+#define BLUR_STRENGTH %BLUR_STRENGTH%
+
+layout (local_size_x = 16, local_size_y = 16) in;
+
+// shader buffer storage objects for current & next frame
+layout(rgba8, location=1) readonly uniform image2D readTex;
+layout(rgba8, location=2) writeonly uniform image2D writeTex;
+
+void main() {
+    // texel coordinate we are writing to
+    ivec2 texelPos = ivec2(gl_GlobalInvocationID.xy);
+    // sum of neighboring texels
+    vec4 sum = vec4(0.0);
+	vec4 originalCol = imageLoad(readTex,texelPos);
+	// 3x3 blur
+	for (int offsetX = -1; offsetX <= 1; offsetX ++) {
+		for (int offsetY = -1; offsetY <= 1; offsetY ++) {
+			int sampleX = min(SCREEN_W-1, max(0, texelPos.x + offsetX));
+			int sampleY = min(SCREEN_H-1, max(0, texelPos.y + offsetY));
+			sum += imageLoad(readTex,ivec2(sampleX,sampleY));
+		}
+	}
+    // blurred color
+	vec4 blurredCol = sum / 9;
+    // final color based on original and blurred
+    vec4 finalColor = originalCol * (1 - BLUR_STRENGTH) + blurredCol * (BLUR_STRENGTH);
+    // write color to next frame
+    imageStore(writeTex,texelPos,finalColor);
+}

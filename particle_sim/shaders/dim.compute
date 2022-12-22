@@ -1,0 +1,21 @@
+#version 430
+
+#define DIMMING_FACTOR %DIMMING_FACTOR%
+
+// define processing layout
+layout (local_size_x = 16, local_size_y = 16) in;
+// current frame
+layout(rgba8, location=1) readonly uniform image2D readTex;
+// next frame
+layout(rgba8, location=2) writeonly uniform image2D writeTex;
+
+void main() {
+    // texel coordinate we are writing to
+    ivec2 texelPos = ivec2(gl_GlobalInvocationID.xy);
+    // get color from current frame
+    vec4 color = imageLoad(readTex,texelPos);
+    // subtract brightness
+    vec4 new_color = color - vec4(DIMMING_FACTOR); // 0.002 is lowest possible value
+    // write color to next frame
+    imageStore(writeTex,texelPos,new_color);
+}
